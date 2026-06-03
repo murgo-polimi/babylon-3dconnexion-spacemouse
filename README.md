@@ -6,7 +6,6 @@ The example provided contains one HTML file, fixed working settings, a live diag
 
 This implementation is based on an existing JavaScript API provided by 3dconnexion (`3dconnexion.min.js`) attached to a similar impementation for Three.js (https://3dconnexion.com/technical_support/web_threejs.html)
 
-```
 
 NB. The 3dconnexion API `3dconnexion.min.js` is not included in this repository. Download it and place it at:
 

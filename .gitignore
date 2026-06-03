@@ -1,0 +1,4 @@
+.DS_Store
+node_modules/
+vendor/3dconnexion.min.js
+*.log

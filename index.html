@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Babylon.js + 3Dconnexion SpaceMouse</title>
+  <style>
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    #renderCanvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      touch-action: none;
+    }
+
+    #panel {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      width: 420px;
+      max-width: calc(100vw - 24px);
+      max-height: calc(100vh - 24px);
+      overflow: auto;
+      box-sizing: border-box;
+      padding: 12px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.92);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    #panel h1 {
+      margin: 0 0 8px;
+      font-size: 14px;
+    }
+
+    #status {
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
+    button {
+      margin: 2px 4px 8px 0;
+      font-size: 12px;
+    }
+
+    pre {
+      margin: 6px 0 0;
+      max-height: 260px;
+      overflow: auto;
+      white-space: pre-wrap;
+      background: #f1f1f1;
+      padding: 8px;
+      border-radius: 4px;
+    }
+  </style>
+
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  <!--
+    This repository does not redistribute 3dconnexion.min.js.
+    Place your local copy at ./vendor/3dconnexion.min.js.
+  -->
+  <script src="./vendor/3dconnexion.min.js"></script>
+</head>
+<body>
+<canvas id="renderCanvas" tabindex="1"></canvas>
+
+<div id="panel">
+  <h1>Babylon.js + 3Dconnexion SpaceMouse</h1>
+  <div id="status">initializing</div>
+  <button id="resetBtn">Reset camera</button>
+  <button id="downloadBtn">Download log</button>
+  <div id="counters"></div>
+  <pre id="log"></pre>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // Fixed navigation configuration verified with the SpaceMouse hardware tests.
+  const CONFIG = Object.freeze({
+    rightHandedScene: true,
+    useRowMajorOrder: false,
+    transposeIncoming: false,
+    transposeOutgoing: false,
+    normalizeW: true,
+    useTargetForMovement: false,
+    maxTranslationStep: 0.08
+  });
+
+  const canvas = document.getElementById('renderCanvas');
+  const statusEl = document.getElementById('status');
+  const countersEl = document.getElementById('counters');
+  const logEl = document.getElementById('log');
+
+  const engine = new BABYLON.Engine(canvas, true);
+  const scene = new BABYLON.Scene(engine);
+
+  // The 3Dconnexion web sample is Three.js-based. Three.js is right-handed, so
+  // the Babylon scene is also set to right-handed mode. This avoids an extra
+  // Z-axis reflection layer and keeps the matrix signs stable.
+  scene.useRightHandedSystem = CONFIG.rightHandedScene;
+  scene.clearColor = new BABYLON.Color4(0.88, 0.91, 0.95, 1);
+
+  const camera = new BABYLON.UniversalCamera(
+    'camera',
+    new BABYLON.Vector3(0, 2, -10),
+    scene
+  );
+  camera.rotationQuaternion = BABYLON.Quaternion.Identity();
+  camera.attachControl(canvas, true);
+  camera.speed = 0.25;
+
+  new BABYLON.HemisphericLight('light', new BABYLON.Vector3(0, 1, 0), scene);
+
+  const ground = BABYLON.MeshBuilder.CreateGround('ground', { width: 40, height: 40 }, scene);
+  ground.name = 'ground';
+
+  for (let z = -15; z <= 15; z += 5) {
+    for (let x = -15; x <= 15; x += 5) {
+      const box = BABYLON.MeshBuilder.CreateBox('box', { size: 1 }, scene);
+      box.position.set(x, 0.5, z);
+    }
+  }
+
+  let driverViewMatrix = null;
+  let previousDriverViewMatrix = null;
+  const events = [];
+  const counters = {
+    viewMatrix: 0,
+    target: 0,
+    lookFrom: 0,
+    lookDirection: 0,
+    transaction: 0,
+    errors: 0
+  };
+
+  function round6(value) {
+    return typeof value === 'number' ? Number(value.toFixed(6)) : value;
+  }
+
+  function cloneForLog(value) {
+    return JSON.parse(JSON.stringify(value, function (_key, item) {
+      return typeof item === 'number' ? round6(item) : item;
+    }));
+  }
+
+  function matrixToArray(matrix) {
+    return Array.prototype.slice.call(matrix.asArray(), 0, 16).map(round6);
+  }
+
+  function matrixFromArray(values) {
+    const matrix = BABYLON.Matrix.Identity();
+    BABYLON.Matrix.FromArrayToRef(values, 0, matrix);
+    return matrix;
+  }
+
+  function transpose4x4(values) {
+    return [
+      values[0], values[4], values[8],  values[12],
+      values[1], values[5], values[9],  values[13],
+      values[2], values[6], values[10], values[14],
+      values[3], values[7], values[11], values[15]
+    ];
+  }
+
+  function normalizeHomogeneousW(values) {
+    const w = values[15];
+    if (!CONFIG.normalizeW || !Number.isFinite(w) || Math.abs(w) < 1e-9 || Math.abs(w - 1) < 0.001) {
+      return values;
+    }
+    return values.map(function (value) { return value / w; });
+  }
+
+  function matrixStats(values) {
+    return {
+      m12: round6(values[12]),
+      m13: round6(values[13]),
+      m14: round6(values[14]),
+      m15: round6(values[15])
+    };
+  }
+
+  function cameraState() {
+    camera.computeWorldMatrix(true);
+    return {
+      position: [round6(camera.position.x), round6(camera.position.y), round6(camera.position.z)],
+      rotationQuaternion: [
+        round6(camera.rotationQuaternion.x),
+        round6(camera.rotationQuaternion.y),
+        round6(camera.rotationQuaternion.z),
+        round6(camera.rotationQuaternion.w)
+      ],
+      viewMatrix: matrixToArray(camera.getViewMatrix())
+    };
+  }
+
+  function logEvent(type, payload) {
+    const event = {
+      tMs: round6(performance.now()),
+      type: type,
+      payload: cloneForLog(payload || {}),
+      camera: cameraState()
+    };
+    events.push(event);
+    if (events.length > 2000) {
+      events.shift();
+    }
+    updateLogPanel();
+  }
+
+  function updateLogPanel() {
+    countersEl.textContent = 'viewMatrix=' + counters.viewMatrix +
+      ' target=' + counters.target +
+      ' transactions=' + counters.transaction +
+      ' errors=' + counters.errors;
+
+    logEl.textContent = events.slice(-18).map(function (event) {
+      return event.type + ' ' + JSON.stringify(event.payload);
+    }).join('\n');
+  }
+
+  function cleanWorldMatrix(worldMatrix) {
+    const scale = new BABYLON.Vector3();
+    const rotation = new BABYLON.Quaternion();
+    const position = new BABYLON.Vector3();
+    worldMatrix.decompose(scale, rotation, position);
+    rotation.normalize();
+    return { position: position, rotation: rotation };
+  }
+
+  function canonicalViewFromCamera() {
+    return matrixToArray(camera.getViewMatrix());
+  }
+
+  function resetDriverFrameFromCamera() {
+    driverViewMatrix = canonicalViewFromCamera();
+    previousDriverViewMatrix = driverViewMatrix.slice();
+  }
+
+  function prepareIncomingViewMatrix(values) {
+    let matrixValues = Array.prototype.slice.call(values, 0, 16);
+    if (CONFIG.transposeIncoming) {
+      matrixValues = transpose4x4(matrixValues);
+    }
+    return normalizeHomogeneousW(matrixValues);
+  }
+
+  function applySpaceMouseViewMatrix(values) {
+    const incomingView = prepareIncomingViewMatrix(values);
+    driverViewMatrix = incomingView.slice();
+
+    if (!previousDriverViewMatrix) {
+      previousDriverViewMatrix = incomingView.slice();
+      logEvent('driver-frame-initialized', { view: matrixStats(incomingView) });
+      return;
+    }
+
+    const previousView = matrixFromArray(previousDriverViewMatrix);
+    const currentView = matrixFromArray(incomingView);
+
+    const previousWorld = BABYLON.Matrix.Identity();
+    const currentWorld = BABYLON.Matrix.Identity();
+    previousView.invertToRef(previousWorld);
+    currentView.invertToRef(currentWorld);
+
+    const previousCamera = cleanWorldMatrix(previousWorld);
+    const currentCamera = cleanWorldMatrix(currentWorld);
+
+    // Translation design choice:
+    // The SDK matrix is an absolute view matrix. Applying it directly makes
+    // translation stay attached to the SDK's original navigation frame. Instead,
+    // use only the raw translation difference between consecutive SDK matrices
+    // and replay that difference on the current Babylon camera axes.
+    const rawDelta = currentCamera.position.subtract(previousCamera.position);
+    let dx = rawDelta.x;
+    let dy = rawDelta.y;
+    let dz = rawDelta.z;
+
+    const stepLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    let clampScale = 1;
+    if (Number.isFinite(stepLength) && stepLength > CONFIG.maxTranslationStep) {
+      clampScale = CONFIG.maxTranslationStep / stepLength;
+      dx *= clampScale;
+      dy *= clampScale;
+      dz *= clampScale;
+    }
+
+    // Rotation design choice:
+    // Rotation is also applied incrementally. The local rotation delta from the
+    // SDK stream is multiplied into the current Babylon camera orientation.
+    const inversePreviousWorld = BABYLON.Matrix.Identity();
+    previousWorld.invertToRef(inversePreviousWorld);
+    const localDeltaMatrix = inversePreviousWorld.multiply(currentWorld);
+
+    const deltaScale = new BABYLON.Vector3();
+    const deltaRotation = new BABYLON.Quaternion();
+    const deltaTranslation = new BABYLON.Vector3();
+    localDeltaMatrix.decompose(deltaScale, deltaRotation, deltaTranslation);
+    deltaRotation.normalize();
+
+    camera.computeWorldMatrix(true);
+    const cameraRight = camera.getDirection(BABYLON.Axis.X).normalize();
+    const cameraUp = camera.getDirection(BABYLON.Axis.Y).normalize();
+    const cameraForward = camera.getDirection(BABYLON.Axis.Z).normalize();
+
+    const newPosition = camera.position
+      .add(cameraRight.scale(dx))
+      .add(cameraUp.scale(dy))
+      .add(cameraForward.scale(dz));
+
+    const newRotation = camera.rotationQuaternion.multiply(deltaRotation);
+    newRotation.normalize();
+
+    const finite = [
+      newPosition.x, newPosition.y, newPosition.z,
+      newRotation.x, newRotation.y, newRotation.z, newRotation.w
+    ].every(Number.isFinite);
+
+    if (finite) {
+      camera.position.copyFrom(newPosition);
+      camera.rotationQuaternion.copyFrom(newRotation);
+      camera.computeWorldMatrix(true);
+    } else {
+      counters.errors += 1;
+    }
+
+    previousDriverViewMatrix = incomingView.slice();
+
+    logEvent('local-control-delta', {
+      dx: round6(dx),
+      dy: round6(dy),
+      dz: round6(dz),
+      stepLength: round6(stepLength),
+      clampScale: round6(clampScale),
+      incomingView: matrixStats(incomingView)
+    });
+  }
+
+  function getViewMatrixForDriver() {
+    resetDriverFrameFromCamera();
+    let output = driverViewMatrix.slice();
+    if (CONFIG.transposeOutgoing) {
+      output = transpose4x4(output);
+    }
+    logEvent('getViewMatrix', { view: matrixStats(output) });
+    return output;
+  }
+
+  function lookTarget(distance) {
+    const forward = camera.getDirection(BABYLON.Axis.Z).normalize();
+    return camera.position.add(forward.scale(distance));
+  }
+
+  function identityMatrixArray() {
+    return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  }
+
+  const client = {
+    onConnect: function () {
+      statusEl.textContent = 'connected; creating 3D mouse';
+      create3DMouse();
+    },
+
+    onDisconnect: function (reason) {
+      statusEl.textContent = 'disconnected: ' + reason;
+    },
+
+    on3dmouseCreated: function () {
+      statusEl.textContent = '3D mouse ready. Click the canvas, then move the SpaceMouse.';
+      canvas.focus();
+    },
+
+    getViewMatrix: getViewMatrixForDriver,
+
+    setViewMatrix: function (values) {
+      counters.viewMatrix += 1;
+      applySpaceMouseViewMatrix(values);
+    },
+
+    // setTarget is intentionally diagnostic-only. In the tested browser/device
+    // setup it behaved as an absolute navigation value and caused axis coupling
+    // when used for fly translation.
+    getViewTarget: function () {
+      const target = lookTarget(10);
+      return [target.x, target.y, target.z];
+    },
+
+    setTarget: function (values) {
+      counters.target += 1;
+      if (CONFIG.useTargetForMovement) {
+        logEvent('setTarget-unused-config-enabled', values);
+      } else {
+        logEvent('setTarget-ignored', values);
+      }
+    },
+
+    getConstructionPlane: identityMatrixArray,
+    getViewExtents: function () { return [80, 80, 80]; },
+    setViewExtents: function (values) { logEvent('setViewExtents', values); },
+    getFov: function () { return camera.fov; },
+    setFov: function (value) { if (typeof value === 'number' && value > 0.01 && value < Math.PI) camera.fov = value; },
+    getViewFrustum: function () { return [camera.minZ, camera.maxZ]; },
+    getPerspective: function () { return true; },
+    getViewRotatable: function () { return true; },
+    getModelExtents: function () { return [-40, -1, -40, 40, 20, 40]; },
+    getFloorPlane: function () { return [0, 1, 0, 0]; },
+    getUnitsToMeters: function () { return 1; },
+    getPivotPosition: function () { const p = lookTarget(5); return [p.x, p.y, p.z]; },
+    setPivotPosition: function (values) { logEvent('setPivotPosition', values); },
+    setPivotVisible: function (value) { logEvent('setPivotVisible', value); },
+    getLookAt: function () { const p = lookTarget(10); return [p.x, p.y, p.z]; },
+    setLookFrom: function (values) { counters.lookFrom += 1; logEvent('setLookFrom', values); },
+    setLookDirection: function (values) { counters.lookDirection += 1; logEvent('setLookDirection', values); },
+    setLookAperture: function (value) { logEvent('setLookAperture', value); },
+    setTransaction: function (value) { counters.transaction += 1; logEvent('setTransaction', value); },
+    setMoving: function (value) { logEvent('setMoving', value); },
+    setActiveCommand: function (value) { logEvent('setActiveCommand', value); },
+    getSelectionAffine: identityMatrixArray,
+    setSelectionAffine: function (values) { logEvent('setSelectionAffine', values); },
+    getSelectionEmpty: function () { return true; },
+    getSelectionExtents: function () { return [0, 0, 0, 0, 0, 0]; },
+    getPointerPosition: function () { return [0, 0]; },
+    getCoordinateSystem: function () { return 'right-handed'; },
+    getFrontView: identityMatrixArray,
+    getFrameTimingSource: function () { return 'requestAnimationFrame'; },
+    getFrameTime: function () { return performance.now() / 1000; },
+    setKeyPress: function (value) { logEvent('setKeyPress', value); },
+    setKeyRelease: function (value) { logEvent('setKeyRelease', value); },
+    setSettingsChanged: function (value) { logEvent('setSettingsChanged', value); }
+  };
+
+  let connexion = null;
+
+  function create3DMouse() {
+    try {
+      connexion = connexion || new _3Dconnexion(client);
+      const option = CONFIG.useRowMajorOrder && _3Dconnexion.nlOptions
+        ? _3Dconnexion.nlOptions.rowMajorOrder
+        : 0;
+      connexion.create3dmouse(canvas, 'Babylon SpaceMouse local controls', option);
+      logEvent('create3dmouse', { option: option });
+    } catch (error) {
+      counters.errors += 1;
+      statusEl.textContent = 'create3dmouse error: ' + (error.message || error);
+      logEvent('error', { message: error.message || String(error) });
+    }
+  }
+
+  function resetCamera() {
+    camera.position.set(0, 2, -10);
+    camera.rotationQuaternion.copyFrom(BABYLON.Quaternion.Identity());
+    camera.computeWorldMatrix(true);
+    resetDriverFrameFromCamera();
+    logEvent('resetCamera', {});
+  }
+
+  function downloadLog() {
+    const output = {
+      createdAt: new Date().toISOString(),
+      userAgent: navigator.userAgent,
+      babylonVersion: BABYLON.Engine.Version,
+      config: CONFIG,
+      counters: counters,
+      finalCamera: cameraState(),
+      events: events
+    };
+
+    const blob = new Blob([JSON.stringify(output, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'babylon-3dconnexion-log-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  document.getElementById('resetBtn').addEventListener('click', resetCamera);
+  document.getElementById('downloadBtn').addEventListener('click', downloadLog);
+  canvas.addEventListener('click', function () { canvas.focus(); });
+  window.addEventListener('resize', function () { engine.resize(); });
+
+  resetDriverFrameFromCamera();
+
+  if (typeof _3Dconnexion === 'undefined') {
+    statusEl.textContent = 'ERROR: ./vendor/3dconnexion.min.js was not loaded';
+    counters.errors += 1;
+    logEvent('missing-3dconnexion-library', {});
+  } else {
+    connexion = new _3Dconnexion(client);
+    connexion.connect();
+  }
+
+  engine.runRenderLoop(function () {
+    scene.render();
+  });
+
+  updateLogPanel();
+})();
+</script>
+</body>
+</html>

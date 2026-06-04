@@ -1,8 +1,8 @@
 {
   "name": "babylon-3dconnexion-spacemouse",
   "version": "1.0.0",
-  "private": true,
-  "description": "Minimal Babylon.js example for 3Dconnexion SpaceMouse fly navigation.",
+  "private": false,
+  "description": "Minimal Babylon.js SpaceMouse fly-navigation example using the 3Dconnexion web JavaScript API.",
   "scripts": {
     "start": "python3 -m http.server 8000"
   }

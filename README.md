@@ -1,14 +1,12 @@
 # Babylon.js + 3Dconnexion SpaceMouse fly navigation
 
-This repository contains a minimal Babylon.js example and a reusable JavaScript controller for using a 3Dconnexion SpaceMouse / SpaceNavigator-style 6-DOF device as a fly-navigation camera controller.
+This repository contains a minimal Babylon.js example and a reusable JavaScript controller for using a 3Dconnexion SpaceMouse / SpaceNavigator-style 6-DOF device as a fly-navigation camera controller. This project is inpired by an analogous implementation for Three.js (https://3dconnexion.com/technical_support/web_threejs.html).
 
-The browser page is intentionally simple. The integration logic is in:
+The HTML example only creates a Babylon scene, creates a camera, and attaches the controller. The integration logic is in:
 
 ```text
 js/babylon-3dconnexion-fly-controller.js
 ```
-
-The HTML example only creates a Babylon scene, creates a camera, and attaches the controller.
 
 ## Repository structure
 
@@ -165,15 +163,3 @@ You can also read `controller.log` directly from your application.
 ## 3Dconnexion JavaScript file and licensing
 
 This repository intentionally does not redistribute `3dconnexion.min.js`.
-
-Recommended policy:
-
-1. Obtain `3dconnexion.min.js` from official 3Dconnexion resources according to the terms that apply to your use case.
-2. Place it in `vendor/3dconnexion.min.js` for local development.
-3. Do not commit it unless you have explicit redistribution rights.
-
-The `.gitignore` file excludes:
-
-```text
-vendor/3dconnexion.min.js
-```
